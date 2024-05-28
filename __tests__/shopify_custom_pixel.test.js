@@ -1,5 +1,3 @@
-// __tests__/eventTracking.test.js
-
 // Mock global objects and methods
 global.document = {
   createElement: jest.fn().mockReturnValue({
@@ -17,31 +15,27 @@ global.window = {
       trackEvent: jest.fn()
     }
   },
-  addEventListener: jest.fn((event, callback) => {
-    if (event === 'fueled-shopify-ready') {
-      callback();
-    }
-  })
+  addEventListener: jest.fn()
 };
 
 // Mock the analytics object
 global.analytics = {
-  subscribe: jest.fn((eventName, callback) => {
-    callback({ name: eventName });
-  })
+  subscribe: jest.fn()
 };
+
+// Define constants for events
+const TRACK_EVENTS = [
+  'checkout_started',
+  'checkout_contact_info_submitted',
+  'checkout_address_info_submitted',
+  'payment_info_submitted'
+];
+
+const GA4_EXCLUDED_EVENTS = ['checkout_started'];
 
 // Import the code to be tested
 const { loadScript, trackEvent, initializeTracking } = (() => {
-  // The actual code that needs testing
-  const trackEvents = [
-    'checkout_started',
-    'checkout_contact_info_submitted',
-    'checkout_address_info_submitted',
-    'payment_info_submitted'
-  ];
-
-  const ga4ExcludedEvents = ['checkout_started'];
+  const SCRIPT_URL = `/apps/fueled/client.js?page=custom_pixel&rand=1`;
 
   function loadScript(src) {
     const script = document.createElement("script");
@@ -49,8 +43,8 @@ const { loadScript, trackEvent, initializeTracking } = (() => {
     document.head.appendChild(script);
   }
 
-  function trackEvent(event) {
-    const options = ga4ExcludedEvents.includes(event.name) ? {
+  function trackEvent(event, excludeFromGA4) {
+    const options = excludeFromGA4 ? {
       plugins: {
         all: true,
         "google-analytics": false,
@@ -61,21 +55,21 @@ const { loadScript, trackEvent, initializeTracking } = (() => {
   }
 
   function initializeTracking(configs) {
-    const events = [];
+    const eventsBuffer = [];
     let scriptLoaded = false;
     let fueledReady = false;
 
     configs.trackEvents.forEach(eventName => {
       analytics.subscribe(eventName, event => {
         if (!scriptLoaded) {
-          loadScript(`/apps/fueled/client.js?page=custom_pixel&rand=1`);
+          loadScript(SCRIPT_URL);
           scriptLoaded = true;
         }
 
         if (fueledReady) {
-          trackEvent(event);
+          trackEvent(event, configs.ga4ExcludedEvents.includes(event.name));
         } else {
-          events.push(event);
+          eventsBuffer.push(event);
         }
       });
     });
@@ -83,17 +77,21 @@ const { loadScript, trackEvent, initializeTracking } = (() => {
     window.addEventListener("fueled-shopify-ready", () => {
       if (!fueledReady) {
         fueledReady = true;
-        events.forEach(event => trackEvent(event));
+        eventsBuffer.forEach(event => trackEvent(event, configs.ga4ExcludedEvents.includes(event.name)));
       }
     });
   }
 
-  initializeTracking({ trackEvents, ga4ExcludedEvents });
+  initializeTracking({ trackEvents: TRACK_EVENTS, ga4ExcludedEvents: GA4_EXCLUDED_EVENTS });
 
   return { loadScript, trackEvent, initializeTracking };
 })();
 
 describe('loadScript', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
   it('should create and append a script element', () => {
     loadScript('test-script.js');
     expect(document.createElement).toHaveBeenCalledWith('script');
@@ -103,9 +101,13 @@ describe('loadScript', () => {
 });
 
 describe('trackEvent', () => {
-  it('should call fueled.customPixel.trackEvent with the correct parameters', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('should call fueled.customPixel.trackEvent with the correct parameters for excluded events', () => {
     const event = { name: 'checkout_started' };
-    trackEvent(event);
+    trackEvent(event, true);
     expect(window.fueled.customPixel.trackEvent).toHaveBeenCalledWith(event, {
       plugins: {
         all: true,
@@ -116,7 +118,7 @@ describe('trackEvent', () => {
 
   it('should call fueled.customPixel.trackEvent without options for non-excluded events', () => {
     const event = { name: 'checkout_contact_info_submitted' };
-    trackEvent(event);
+    trackEvent(event, false);
     expect(window.fueled.customPixel.trackEvent).toHaveBeenCalledWith(event, null, expect.any(Function));
   });
 });
@@ -128,24 +130,43 @@ describe('initializeTracking', () => {
 
   it('should subscribe to events and load the script', () => {
     const configs = {
-      trackEvents: ['checkout_started'],
-      ga4ExcludedEvents: ['checkout_started']
+      trackEvents: TRACK_EVENTS,
+      ga4ExcludedEvents: GA4_EXCLUDED_EVENTS
     };
+
+    // Mock analytics.subscribe to simulate event subscription
+    global.analytics.subscribe.mockImplementation((eventName, callback) => {
+      callback({ name: eventName });
+    });
 
     initializeTracking(configs);
 
-    expect(analytics.subscribe).toHaveBeenCalledWith('checkout_started', expect.any(Function));
-    expect(document.createElement).toHaveBeenCalled();
+    // Verify that subscribe was called for each event
+    TRACK_EVENTS.forEach(eventName => {
+      expect(analytics.subscribe).toHaveBeenCalledWith(eventName, expect.any(Function));
+    });
+
+    // Verify that the script was created and appended
+    expect(document.createElement).toHaveBeenCalledWith('script');
     expect(document.head.appendChild).toHaveBeenCalled();
   });
 
   it('should track events when fueled is ready', () => {
     const configs = {
-      trackEvents: ['checkout_started'],
-      ga4ExcludedEvents: ['checkout_started']
+      trackEvents: TRACK_EVENTS,
+      ga4ExcludedEvents: GA4_EXCLUDED_EVENTS
     };
 
+    // Mock analytics.subscribe to simulate event subscription
+    global.analytics.subscribe.mockImplementation((eventName, callback) => {
+      callback({ name: eventName });
+    });
+
     initializeTracking(configs);
+
+    // Simulate Fueled ready event
+    const fueledReadyEvent = window.addEventListener.mock.calls.find(call => call[0] === 'fueled-shopify-ready')[1];
+    fueledReadyEvent();
 
     expect(window.fueled.customPixel.trackEvent).toHaveBeenCalledWith({ name: 'checkout_started' }, {
       plugins: {
@@ -157,8 +178,8 @@ describe('initializeTracking', () => {
 
   it('should buffer events until fueled is ready', () => {
     const configs = {
-      trackEvents: ['checkout_started'],
-      ga4ExcludedEvents: ['checkout_started']
+      trackEvents: TRACK_EVENTS,
+      ga4ExcludedEvents: GA4_EXCLUDED_EVENTS
     };
 
     const bufferedEvent = { name: 'checkout_started' };
@@ -171,11 +192,65 @@ describe('initializeTracking', () => {
     initializeTracking(configs);
 
     expect(global.analytics.subscribe).toHaveBeenCalled();
+    expect(window.fueled.customPixel.trackEvent).not.toHaveBeenCalled();
+
+    // Simulate Fueled ready event
+    const fueledReadyEvent = window.addEventListener.mock.calls.find(call => call[0] === 'fueled-shopify-ready')[1];
+    fueledReadyEvent();
+
     expect(window.fueled.customPixel.trackEvent).toHaveBeenCalledWith(bufferedEvent, {
       plugins: {
         all: true,
         "google-analytics": false,
       }
     }, expect.any(Function));
+  });
+
+  it('should not track events before script is loaded', () => {
+    const configs = {
+      trackEvents: TRACK_EVENTS,
+      ga4ExcludedEvents: GA4_EXCLUDED_EVENTS
+    };
+
+    const event = { name: 'checkout_contact_info_submitted' };
+
+    // Mock analytics.subscribe to simulate event before script is loaded
+    global.analytics.subscribe.mockImplementation((eventName, callback) => {
+      callback(event);
+    });
+
+    initializeTracking(configs);
+
+    expect(window.fueled.customPixel.trackEvent).not.toHaveBeenCalled();
+
+    // Simulate Fueled ready event
+    const fueledReadyEvent = window.addEventListener.mock.calls.find(call => call[0] === 'fueled-shopify-ready')[1];
+    fueledReadyEvent();
+
+    expect(window.fueled.customPixel.trackEvent).toHaveBeenCalledWith(event, null, expect.any(Function));
+  });
+
+  it('should not track events before fueled is ready', () => {
+    const configs = {
+      trackEvents: TRACK_EVENTS,
+      ga4ExcludedEvents: GA4_EXCLUDED_EVENTS
+    };
+
+    const event = { name: 'checkout_contact_info_submitted' };
+
+    // Mock analytics.subscribe to simulate event before Fueled is ready
+    global.analytics.subscribe.mockImplementation((eventName, callback) => {
+      callback(event);
+    });
+
+    initializeTracking(configs);
+
+    expect(window.fueled.customPixel.trackEvent).not.toHaveBeenCalled();
+
+    // Simulate Fueled ready event
+    const fueledReadyEvent = window.addEventListener.mock.calls.find(call => call[0] === 'fueled-shopify-ready')[1];
+    fueledReadyEvent();
+
+    expect(window.fueled.customPixel.trackEvent).toHaveBeenCalledWith(event, null, expect.any(Function));
   });
 });
